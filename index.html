@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCM 수요예측 도우미</title>
+<style>
+:root{font:16px/1.55 system-ui,sans-serif;color:#182031;background:#eef0f4;--green:#3b60d0;--border:#dce2ef}*{box-sizing:border-box}body{margin:0}main{max-width:730px;margin:auto;padding:24px 18px 60px}header,.row,.nav{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:20px}.nav{justify-content:flex-start;flex-wrap:wrap;margin:15px 0 25px}h1{font-size:clamp(29px,6vw,47px);line-height:1.15;letter-spacing:-.045em;margin:14px 0}h2{font-size:20px}p{margin:9px 0 16px}small,.muted{color:#52675b}.hero,.card{border-radius:18px;padding:20px;margin:12px 0}.hero{color:white;background:var(--green);padding:28px}.hero small{color:#dcefe5}.card{background:white;border:1px solid var(--border)}button,input{font:inherit}button{cursor:pointer;border:1px solid var(--border);border-radius:10px;padding:9px 13px;background:white;color:inherit}button:hover{background:#edf1ff}button:focus-visible,input:focus-visible{outline:3px solid #4268d5;outline-offset:2px}.primary{background:var(--green);color:white;border-color:var(--green)}.primary:hover{background:#2d50ba}.hero button{margin-top:10px}.wide{width:100%;text-align:left}.tag{display:inline-block;border-radius:99px;padding:3px 10px;background:#def2e5;color:#164d3b;font-size:13px}.warn{background:#ffebd0;color:#743d0d}.big{font-size:clamp(32px,8vw,56px);font-weight:750;letter-spacing:-.04em}.list{display:grid;gap:8px;margin:14px 0}.actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.selected{background:#def2e5;border-color:#4b8969}input[type=number]{max-width:135px;border:1px solid var(--border);border-radius:8px;padding:8px}svg{width:100%;height:auto;display:block}.error{color:#9d2d17}table{width:100%;border-collapse:collapse;text-align:left}td,th{padding:8px;border-bottom:1px solid var(--border)}@media(max-width:440px){.card{padding:13px}.row{gap:6px}.nav button{font-size:13px;padding:6px}}
+</style>
+<main id="app"></main>
+<script>
+'use strict';
+const vehicles = ['세단 A','세단 B','SUV C','SUV D','전기차 E','소형 F'];
+const methods = ['3개월 이동평균','단순 지수평활','추세 반영','계절 반영'];
+const stages = ['현상인식','문제제기','목적','전략','기대효과'];
+const reasons = ['영업 확인 완료','생산 여력 반영','프로모션 반영','예측값 유지'];
+const number = n => Number(n).toLocaleString('ko-KR');
+const mean = xs => xs.reduce((a,b) => a+b,0)/xs.length;
+const month = i => {
+  const d = new Date(Date.UTC(2026, 10+i, 1));
+  return d.toISOString().slice(0,7).replace('-','.');
+};
+const history = vehicles.map((_,i) => Array.from({length:24},(_,t) => {
+  const base = [1180,790,1690,665,590,290][i];
+  const season = [95,9,35,8,9,27][i]*Math.cos((t+4)*Math.PI/6);
+  const trend = [2,0,0,0,8,0.6][i]*t;
+  const noise = [14,36,67,182,22,8][i]*Math.sin(t*2.37+i)*Math.cos(t*0.63+i);
+  return Math.round(base+season+trend+noise);
+}));
+const orders = Array.from({length:12},(_,i) => ({
+  id: i>=10 ? i-10 : i, vehicle:i%6, units:20+i*3
+}));
+const orderCount = new Set(orders.map(order => order.id)).size;
+let source = '추정';
+history[5][20] = Math.round(mean(history[5].slice(17,20)));
+function predict(values, method, horizon=1) {
+  const last = values.at(-1);
+  const slope = (mean(values.slice(-3))-mean(values.slice(-6,-3)))/3;
+  const forecasts = [
+    mean(values.slice(-3)),
+    values.reduce((level,value) => 0.35*value+0.65*level),
+    last+slope*horizon,
+    values.at(horizon-13)+mean(values.slice(-6).map((v,i) => v-values.at(i-18)))
+  ];
+  return Math.max(0,Math.round(forecasts[method]));
+}
+function evaluate(values,method) {
+  const actuals = values.slice(-6);
+  const errors = actuals.map((actual,i) => predict(values.slice(0,values.length-6+i),method)-actual);
+  const percentages = errors.flatMap((error,i) => actuals[i] > 0 ? [Math.abs(error)/actuals[i]*100] : []);
+  return {method, mape:percentages.length ? mean(percentages) : Infinity, mae:mean(errors.map(Math.abs))};
+}
+const flags = new Set();
+const drafts = new Map();
+let threshold = 8;
+let plans = [];
+try { plans = JSON.parse(localStorage.getItem('scm-plans-v1') || '[]'); } catch {}
+if (!Array.isArray(plans)) plans = [];
+let screen = 'home';
+let selected = 0;
+let methodView = 0;
+let section = 0;
+let confirmed = null;
+let saved = true;
+const app = document.querySelector('#app');
+const score = value => Number.isFinite(value) ? value.toFixed(1)+'%' : '산정 불가';
+function forecast(i) {
+  const scores = methods.map((_,method) => evaluate(history[i],method));
+  const best = scores.reduce((a,b) => a.mape <= b.mape ? a : b);
+  return {scores, best, units:predict(history[i],best.method), review:best.mape>threshold || flags.has(i)};
+}
+function range(i, model, h=1) {
+  const value = predict(history[i],model.method,h);
+  const radius = Math.ceil(model.mae*2*Math.sqrt(h));
+  return [Math.max(0,value-radius),value+radius];
+}
+const btn = (label,action,kind='') => `<button class="${kind}" data-action="${action}">${label}</button>`;
+const tag = (label,warn=false) => `<span class="tag ${warn?'warn':''}">${label}</span>`;
+const card = content => `<section class="card">${content}</section>`;
+const names = {input:'① 입력·통합',forecast:'② 수요예측',detail:'차종 상세',review:'③ 예외 협의',done:'④ 판매계획 확정',proposal:'기획서',storage:'저장 구조'};
+const backs = {input:'home',forecast:'input',detail:'forecast',review:'forecast',done:'home',proposal:'home',storage:'home'};
+function chart(i,model) {
+  const actuals = history[i].slice(-12);
+  const predictions = [1,2,3].map(h => predict(history[i],model.method,h));
+  const bounds = [1,2,3].map(h => range(i,model,h));
+  const all = [...actuals,...bounds.flat()];
+  const low = Math.min(...all)-10, high = Math.max(...all)+10;
+  const point = (v,j) => `${(34+j*35).toFixed(1)},${(155-(v-low)/(high-low)*130).toFixed(1)}`;
+  const band = bounds.map((b,j) => point(b[1],j+12)).concat(bounds.map((b,j) => point(b[0],j+12)).reverse());
+  return `<svg viewBox="0 0 560 185" role="img" aria-label="${vehicles[i]} 최근 12개월 실적과 3개월 예측">
+    <path d="M34 25V155H530" fill="none" stroke="#dbe4dc"/>
+    <polygon points="${band.join(' ')}" fill="#d8ece2"/>
+    <polyline points="${actuals.map(point).join(' ')}" fill="none" stroke="#164d3b" stroke-width="3"/>
+    <polyline points="${[actuals.at(-1),...predictions].map((v,j)=>point(v,j+11)).join(' ')}" fill="none" stroke="#b45e1a" stroke-width="3" stroke-dasharray="6 4"/>
+    <text x="34" y="177" font-size="13">실적 · ${month(-12)}</text><text x="445" y="177" font-size="13">예측 · ${month(0)}</text>
+  </svg>`;
+}
+const proposal = [
+  ['수요계획은 8단계를 지나며 합의·승인에서 멈춰요','판매실적·딜러주문 수집|수주예측 수행|실제수주 집계|예측과 실제수주 비교|오차 검토·수정|부서 합의·승인|판매계획 확정|생산·납기계획 연계'],
+  ['반복 수집과 승인 대기가 계획을 늦춰요','자료가 여러 출처에 흩어져 있어요|같은 데이터를 분석과 보고에 다시 정리해요|일반 건도 예외 건과 함께 검토해요'],
+  ['데이터는 미리 모으고, 예외만 사람이 봐요','실적과 주문을 한 번에 점검해요|정해진 오차 기준으로 예외를 분류해요|부서 협의는 조정이 필요한 차종에 집중해요'],
+  ['입력·예측·협의·확정을 한 흐름으로 이어가요','중복 주문을 제외해요|차종별로 네 가지 예측 방법을 백테스트해요|오차 기준과 특이 상황으로 검토 대상을 정해요|확정 수량과 조정 사유를 기록해요'],
+  ['반복 작업과 회의 대기를 줄이는 것이 목표예요','수집부터 확정까지 걸린 시간|협의 대상으로 분류된 차종의 비율|예측과 최종 계획의 실제 오차를 각각 측정']
+];
+function render() {
+  const forecasts = vehicles.map((_,i) => forecast(i));
+  const exceptions = forecasts.flatMap((item,i) => item.review ? [i] : []);
+  const total = forecasts.reduce((sum,item) => sum+item.units,0);
+  const nav = screen==='home' ? '' : `<header>${btn('뒤로',backs[screen])}<strong>${names[screen]}</strong>${btn('홈','home')}</header>`;
+  const steps = screen==='home' || screen==='storage' ? '' : `<nav class="nav" aria-label="기획서">${stages.map((label,i)=>btn(label,'section-'+i,screen==='proposal'&&section===i?'selected':'')).join('')}</nav>`;
+  let body = '';
+  if (screen==='home') {
+    body = `<small>SCM 수요계획팀 · HINT 2기 1조</small><h1>11월 수요계획을 시작해요</h1>${tag('둘러보기 모드 · 이 브라우저에 저장')}
+      <section class="hero"><small>TO-BE 수요계획</small><h1>데이터는 미리 모으고,<br>예외만 사람이 봐요</h1>${btn('11월 예측 바로 하기','input')}</section>
+      <h2>기획서</h2>${btn('기획서 처음부터 보기 ›','section-0','wide')}
+      <h2>최근 기록</h2>${plans.length?plans.map((p,i)=>btn(`11월 판매계획 · ${number(p.total)}대 ›`,'plan-'+i,'wide')).join(''):card('아직 확정한 계획이 없어요.')}
+      ${btn('저장 구조 보기 ›','storage','wide')}`;
+  } else if (screen==='input') {
+    body = `<h1>판매·딜러 데이터를 하나로 모았어요</h1><p>예시 데이터로 시작해요.</p>
+      ${card('✓ 판매실적 · 6개 차종 · 24개월')}
+      ${card(`✓ 딜러주문 · ${orders.length}건 접수 · 중복 ${orders.length-orderCount}건 제외 · 유효 ${orderCount}건`)}
+      ${card(`<form id="actual-form"><label for="actual"><strong>소형 F 2026.07 판매실적</strong></label><p>현재 ${source} ${number(history[5][20])}대. 입력값을 반영하면 예측과 백테스트를 다시 계산해요.</p><input id="actual" name="actual" type="number" min="0" max="10000000" step="1" placeholder="예: 315" required> <button>입력 완료</button></form>`)}
+      <p class="muted">예측 모델은 판매실적을 사용해요. 주문은 통합 단계에서 중복 여부를 점검해요.</p>${btn('예측하기','forecast','primary')}`;
+  } else if (screen==='forecast') {
+    body = `<small>11월 예측 합계</small><div class="big">${number(total)}대</div><p>6개 차종 중 ${6-exceptions.length}개는 기준 이내예요. ${exceptions.length}개를 함께 확인해요.</p>
+      <label>자동 확정 기준 · 오차 <input id="threshold" type="number" min="0" max="100" step="0.1" value="${threshold}"> % 이하</label>
+      <div class="list">${forecasts.map((item,i)=>btn(`<span class="row"><span><strong>${vehicles[i]}</strong><br><small>${methods[item.best.method]} · 오차 ${score(item.best.mape)}</small></span><span><strong>${number(item.units)}대</strong> ${tag(item.review?'협의':'자동',item.review)}</span></span>`,'detail-'+i,'wide')).join('')}</div>
+      <p class="muted">차종마다 네 방법을 비교해 최근 6개월 순차 백테스트 MAPE가 가장 낮은 방법을 골라요. 판매가 0인 달은 MAPE에서 제외해요.</p>
+      ${btn(exceptions.length?`예외 ${exceptions.length}건 확인하기`:'판매계획 검토하기','review','primary')}`;
+  } else if (screen==='detail') {
+    const item = forecasts[selected], model = item.scores[methodView];
+    body = `<h1>${vehicles[selected]}</h1><div class="big">${number(predict(history[selected],methodView))}대</div><p>11월 예상 범위 ${range(selected,model).map(number).join('–')}대 · ${tag(item.review?'협의':'자동',item.review)}</p>
+      ${card(chart(selected,model)+'<small>실선 실적 · 점선 예측 · 음영 예상 범위</small>')}
+      <h2>예측 방법 · 최근 6개월 오차</h2><div class="actions">${item.scores.map(m=>btn(`${methods[m.method]} ${score(m.mape)}${item.best.method===m.method?' ★':''}`,'method-'+m.method,methodView===m.method?'selected':'')).join('')}</div>
+      <p class="muted">★ 최저 오차 모델이 계획에 사용돼요. 다른 방법을 눌러 결과를 비교할 수 있어요.</p>
+      ${card(`<h2>앞으로 3개월</h2>${[1,2,3].map(h=>`<p class="row"><span>${month(h-1)}<br><small>범위 ${range(selected,model,h).map(number).join('–')} · 작년 ${number(history[selected].at(h-13))}</small></span><strong>${number(predict(history[selected],methodView,h))}대</strong></p>`).join('')}<small>범위는 과거 평균 절대 오차를 이용한 참고치예요.</small>`)}
+      ${card(`<label><input id="flag" type="checkbox" ${flags.has(selected)?'checked':''}> 특이 상황 · 대규모 주문이나 공급 제약이 있어요</label>`)}${btn('확인','forecast','primary')}`;
+  } else if (screen==='review') {
+    body = `<h1>${exceptions.length===1?vehicles[exceptions[0]]+'만 같이 확인하면 돼요':exceptions.length?`예외 ${exceptions.length}건을 확인해요`:'모든 차종이 기준 이내예요'}</h1>
+      <p>영업·생산기획과 정한 수량과 사유를 입력해 주세요.</p>
+      <form id="review-form">${exceptions.map(i=>{
+        const item=forecasts[i], draft=drafts.get(i)||{units:item.units,reason:''};
+        const alerts = [item.best.mape>threshold?`최근 오차 ${score(item.best.mape)} · 기준 ${threshold}%`:'',flags.has(i)?'특이 상황 표시됨':''].filter(Boolean).join(' · ');
+        return card(`<strong>${vehicles[i]}</strong> ${tag('협의',true)}<p>${alerts}<br>예측 ${number(item.units)}대 · 예상 범위 ${range(i,item.best).map(number).join('–')}대</p>
+          <label for="units-${i}">확정 수량</label> ${btn('−','minus-'+i)} <input id="units-${i}" data-units="${i}" type="number" min="0" max="10000000" step="1" required value="${draft.units}"> ${btn('+','plus-'+i)}
+          <div class="actions">${reasons.map((r,j)=>btn(r,`reason-${i}-${j}`,draft.reason===r?'selected':'')).join('')}</div>`);
+      }).join('')}<p id="error" class="error" role="alert"></p><button class="primary">판매계획 확정하기</button></form>`;
+  } else if (screen==='done') {
+    body = `<h1>11월 판매계획을 확정했어요</h1><div class="big">${number(confirmed.total)}대</div>
+      <p>${saved?'최근 기록에서 다시 확인할 수 있어요.':'브라우저 저장에 실패했어요. CSV로 내려받아 보관할 수 있어요.'}</p>
+      ${card(`<table><thead><tr><th>차종</th><th>예측</th><th>확정</th><th>근거</th></tr></thead><tbody>${confirmed.items.map(p=>`<tr><td>${vehicles[p.i]}</td><td>${number(p.forecast)}</td><td>${number(p.units)}</td><td>${reasons.includes(p.reason)?p.reason:'기준 이내'}</td></tr>`).join('')}</tbody></table>`)}
+      ${btn('CSV 내려받기','csv','primary')} ${btn('홈으로','home')}`;
+  } else if (screen==='proposal') {
+    const [title,points] = proposal[section];
+    body = `<small>${stages[section]}</small><h1>${title}</h1>${card(`<ol>${points.split('|').map(p=>`<li>${p}</li>`).join('')}</ol>`)}
+      ${section<4?btn('다음','section-'+(section+1),'primary'):btn('11월 예측 바로 하기','input','primary')}`;
+  } else {
+    body = `<h1>데이터는 어디에 저장되나요?</h1>${card('<strong>확정 기록</strong><p>이 브라우저의 로컬 저장소에 저장돼요.</p><strong>입력 및 검토 중인 계획</strong><p>열려 있는 페이지에서 유지돼요.</p><strong>서버·로그인</strong><p>이 데모는 별도 계정이나 공유 DB 없이 실행돼요.</p>')}`;
+  }
+  app.innerHTML = nav+steps+body;
+  app.querySelectorAll('button[data-action]').forEach(button => {button.type='button';});
+}
+function go(next) {
+  screen=next;
+  render();
+  window.scrollTo(0,0);
+}
+function draftFor(i) {
+  if (!drafts.has(i)) drafts.set(i,{units:forecast(i).units,reason:''});
+  return drafts.get(i);
+}
+app.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-action]');
+  if(!button)return;
+  const action=button.dataset.action;
+  const [type,key,extra]=action.split('-');
+  const i=Number(key);
+  if (type==='detail') {
+    selected=i;
+    methodView=forecast(i).best.method;
+    go('detail');
+  } else if(type==='method') {
+    methodView=i;
+    render();
+  } else if(type==='section') {
+    section=i;
+    go('proposal');
+  } else if(type==='plan') {
+    confirmed=plans[i];
+    saved=true;
+    go('done');
+  } else if(type==='plus'||type==='minus') {
+    const input=document.querySelector('#units-'+i);
+    const draft=draftFor(i);
+    draft.units=Math.min(10000000,Math.max(0,(Number(input.value)||0)+(type==='plus'?1:-1)));
+    input.value=draft.units;
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+  } else if(type==='reason') {
+    const draft=draftFor(i);
+    draft.reason=reasons[Number(extra)];
+    if (Number(extra)===3) draft.units=forecast(i).units;
+    render();
+    app.querySelector(`[data-action="${action}"]`).focus();
+  } else if(action==='csv') {
+    const csv=['차종,예측 수량,확정 수량,근거',...confirmed.items.map(p=>[vehicles[p.i],p.forecast,p.units,p.reason].join(','))].join('\r\n');
+    const url=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
+    const link=document.createElement('a');
+    link.href=url;
+    link.download='SCM-2026-11.csv';
+    link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  } else go(action);
+});
+app.addEventListener('input',event=>{
+  if(event.target.dataset.units===undefined)return;
+  const draft=draftFor(Number(event.target.dataset.units));
+  draft.units=event.target.value;
+  if(draft.reason===reasons[3]) {
+    draft.reason='';
+    app.querySelector(`[data-action="reason-${event.target.dataset.units}-3"]`).classList.remove('selected');
+  }
+});
+app.addEventListener('change',event=>{
+  if(event.target.id==='threshold') {
+    if(event.target.value!=='' && event.target.validity.valid) threshold=event.target.valueAsNumber;
+    render();
+    document.querySelector('#threshold').focus();
+  }
+  if(event.target.id==='flag') {
+    if(event.target.checked)flags.add(selected);
+    else flags.delete(selected);
+  }
+});
+app.addEventListener('submit',event=>{
+  event.preventDefault();
+  if(event.target.id==='actual-form') {
+    history[5][20]=event.target.elements.actual.valueAsNumber;
+    source='실적';
+    drafts.delete(5);
+    render();
+    return;
+  }
+  const items=vehicles.map((_,i)=>{
+    const item=forecast(i);
+    const draft=item.review?draftFor(i):{units:item.units,reason:'기준 이내'};
+    const units=item.review?document.querySelector('#units-'+i).valueAsNumber:draft.units;
+    return {i,forecast:item.units,units,reason:draft.reason,model:methods[item.best.method],mape:item.best.mape,threshold};
+  });
+  const missing=items.find(item=>!item.reason || (item.reason===reasons[3]&&item.units!==item.forecast));
+  if(missing) {
+    document.querySelector('#error').textContent=vehicles[missing.i]+'의 수량에 맞는 협의 사유를 선택해 주세요.';
+    return;
+  }
+  confirmed={items,total:items.reduce((sum,item)=>sum+item.units,0)};
+  plans=[confirmed,...plans].slice(0,12);
+  try { localStorage.setItem('scm-plans-v1',JSON.stringify(plans)); saved=true; } catch { saved=false; }
+  drafts.clear();
+  go('done');
+});
+render();
+</script>
+</html>
